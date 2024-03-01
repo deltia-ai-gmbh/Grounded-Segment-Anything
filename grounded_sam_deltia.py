@@ -27,11 +27,13 @@ from segment_anything import sam_model_registry, sam_hq_model_registry, SamPredi
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import fsspec
+import io
 
 
-def load_image(image_path):
+def load_image(file):
     # load image
-    image_pil = Image.open(image_path).convert("RGB")  # load image
+    image_pil = Image.open(io.BytesIO(file.read())).convert("RGB")  # load image
 
     transform = T.Compose(
         [
@@ -212,75 +214,79 @@ if __name__ == "__main__":
     box_threshold = args.box_threshold
     text_threshold = args.text_threshold
     device = args.device
-    image_dir = args.image_dir
+    input_dir = args.input_dir
 
     # make dir
     os.makedirs(output_dir, exist_ok=True)
+    print(input_dir + "/**.png")
+    with fsspec.open_files(input_dir + "/**.png", "rb") as files:
+        for file in files:
+            image_name = os.path.basename(file.full_name)
 
-    for image_path in glob.glob(os.path.join(image_dir, "*.jpg")):
-        image_name = os.path.basename(image_path)
+            # load image
+            image_pil, image = load_image(file)
+            # load model
+            model = load_model(config_file, grounded_checkpoint, device=device)
 
-        # load image
-        image_pil, image = load_image(image_path)
-        # load model
-        model = load_model(config_file, grounded_checkpoint, device=device)
+            # visualize raw image
+            image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
 
-        # visualize raw image
-        image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
+            # run grounding dino model
+            boxes_filt, pred_phrases = get_grounding_output(
+                model, image, text_prompt, box_threshold, text_threshold, device=device
+            )
 
-        # run grounding dino model
-        boxes_filt, pred_phrases = get_grounding_output(
-            model, image, text_prompt, box_threshold, text_threshold, device=device
-        )
-
-        # initialize SAM
-        if use_sam_hq:
-            predictor = SamPredictor(
-                sam_hq_model_registry[sam_version](checkpoint=sam_hq_checkpoint).to(
-                    device
+            # initialize SAM
+            if use_sam_hq:
+                predictor = SamPredictor(
+                    sam_hq_model_registry[sam_version](checkpoint=sam_hq_checkpoint).to(
+                        device
+                    )
                 )
+            else:
+                predictor = SamPredictor(
+                    sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(
+                        device
+                    )
+                )
+            file.seek(0)
+            image = cv2.imread(io.BytesIO(file.read()))
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            predictor.set_image(image)
+
+            size = image_pil.size
+            H, W = size[1], size[0]
+            for i in range(boxes_filt.size(0)):
+                boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
+                boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
+                boxes_filt[i][2:] += boxes_filt[i][:2]
+
+            boxes_filt = boxes_filt.cpu()
+            transformed_boxes = predictor.transform.apply_boxes_torch(
+                boxes_filt, image.shape[:2]
+            ).to(device)
+
+            masks, _, _ = predictor.predict_torch(
+                point_coords=None,
+                point_labels=None,
+                boxes=transformed_boxes.to(device),
+                multimask_output=False,
             )
-        else:
-            predictor = SamPredictor(
-                sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(device)
+
+            # draw output image
+            plt.figure(figsize=(10, 10))
+            plt.imshow(image)
+            for mask in masks:
+                show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
+            for box, label in zip(boxes_filt, pred_phrases):
+                show_box(box.numpy(), plt.gca(), label)
+
+            plt.axis("off")
+            plt.savefig(
+                os.path.join(output_dir, f"{image_name}_gsa.jpg"),
+                bbox_inches="tight",
+                dpi=300,
+                pad_inches=0.0,
             )
-        image = cv2.imread(image_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        predictor.set_image(image)
 
-        size = image_pil.size
-        H, W = size[1], size[0]
-        for i in range(boxes_filt.size(0)):
-            boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
-            boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
-            boxes_filt[i][2:] += boxes_filt[i][:2]
-
-        boxes_filt = boxes_filt.cpu()
-        transformed_boxes = predictor.transform.apply_boxes_torch(
-            boxes_filt, image.shape[:2]
-        ).to(device)
-
-        masks, _, _ = predictor.predict_torch(
-            point_coords=None,
-            point_labels=None,
-            boxes=transformed_boxes.to(device),
-            multimask_output=False,
-        )
-
-        # draw output image
-        plt.figure(figsize=(10, 10))
-        plt.imshow(image)
-        for mask in masks:
-            show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
-        for box, label in zip(boxes_filt, pred_phrases):
-            show_box(box.numpy(), plt.gca(), label)
-
-        plt.axis("off")
-        plt.savefig(
-            os.path.join(output_dir, f"{image_name}_gsa.jpg"),
-            bbox_inches="tight",
-            dpi=300,
-            pad_inches=0.0,
-        )
-
-        save_mask_data(output_dir, masks, boxes_filt, pred_phrases, image_name)
+            save_mask_data(output_dir, masks, boxes_filt, pred_phrases, image_name)
