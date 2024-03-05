@@ -28,7 +28,7 @@ build-image:
 	docker build --build-arg USE_CUDA=$(USE_CUDA) \
 	--build-arg TORCH_ARCH=$(TORCH_CUDA_ARCH_LIST) \
 	--platform=linux/amd64 \
-	-t gsa:v0 .
+	-t gsa:$(shell git rev-parse --short HEAD) .
 run:
 ifeq (,$(wildcard ./sam_vit_h_4b8939.pth))
 	wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
