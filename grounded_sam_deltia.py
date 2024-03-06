@@ -128,7 +128,7 @@ def save_mask_data(output_dir, mask_list, box_list, label_list, image_name):
     plt.imshow(mask_img.numpy())
     plt.axis("off")
     plt.savefig(
-        os.path.join(output_dir, "mask.jpg"),
+        os.path.join(output_dir, f"{image_name.split('.')[0]}_mask.png"),
         bbox_inches="tight",
         dpi=300,
         pad_inches=0.0,
@@ -219,39 +219,37 @@ if __name__ == "__main__":
     # make dir
     os.makedirs(output_dir, exist_ok=True)
     print(input_dir + "/**.png")
+
+    # load model
+    model = load_model(config_file, grounded_checkpoint, device=device)
+
+    # initialize SAM
+    if use_sam_hq:
+        predictor = SamPredictor(
+            sam_hq_model_registry[sam_version](checkpoint=sam_hq_checkpoint).to(device)
+        )
+    else:
+        predictor = SamPredictor(
+            sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(device)
+        )
+
     with fsspec.open_files(input_dir + "/**.png", "rb") as files:
         for file in files:
             image_name = os.path.basename(file.full_name)
 
             # load image
             image_pil, image = load_image(file)
-            # load model
-            model = load_model(config_file, grounded_checkpoint, device=device)
-
-            # visualize raw image
-            image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
 
             # run grounding dino model
             boxes_filt, pred_phrases = get_grounding_output(
                 model, image, text_prompt, box_threshold, text_threshold, device=device
             )
 
-            # initialize SAM
-            if use_sam_hq:
-                predictor = SamPredictor(
-                    sam_hq_model_registry[sam_version](checkpoint=sam_hq_checkpoint).to(
-                        device
-                    )
-                )
-            else:
-                predictor = SamPredictor(
-                    sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(
-                        device
-                    )
-                )
-            file.seek(0)
-            image = cv2.imread(io.BytesIO(file.read()))
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            if boxes_filt.size(0) == 0:
+                print(f"No object found in {image_name}")
+                continue
+
+            image = np.array(image_pil)
             predictor.set_image(image)
 
             size = image_pil.size
@@ -283,7 +281,7 @@ if __name__ == "__main__":
 
             plt.axis("off")
             plt.savefig(
-                os.path.join(output_dir, f"{image_name}_gsa.jpg"),
+                os.path.join(output_dir, f"{image_name.split('.')[0]}_gsa.png"),
                 bbox_inches="tight",
                 dpi=300,
                 pad_inches=0.0,
